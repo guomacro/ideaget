@@ -11,13 +11,7 @@ API 下载到的论文写入 Zotero 对应集合。
 
 ## 当前状态
 
-**阶段 1 已收口**：host 读线路端到端验证通过——Zotero 本地 API 只读传输 +
-PDF→Markdown 管线（pdfjs，官方无此插件故自带）+ 4 个模型工具 + 中间探针；
-插件已在**真实 Cordis 树内挂载**（官方 `boot()`，systemPrompt→tools→ideaget）
-并返回真实 Zotero 论文标题。实现细节与实测见
-[docs/06-impl-notes.md](docs/06-impl-notes.md)。
-LLM/Agent 与写路径仅保留端口未接入；前端按确认路线后续再加（三栏视图，
-先不声明 `dsh.client`）。
+**阶段 1–3 已交付，测试通过**：host 读线路（Zotero 本地 API + PDF→Markdown 管线 + 探针）在真实 Cordis 树内挂载验证、返回真实论文标题；vitest 34 用例全绿；client half 已声明 `dsh.client` 并注册 conversation.view 三栏视图（esbuild bundle 经 dsh CJS 宿主语义验证）。LLM/写路径/三栏数据接入与 Remote 仍是保留端口。详见 [docs/06-impl-notes.md](docs/06-impl-notes.md)。
 
 版本管理：git + 远端 `https://github.com/guomacro/ideaget.git`（main）。
 

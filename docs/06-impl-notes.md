@@ -1,8 +1,8 @@
-# 06 · 实现记录：读线路首轮落地（stage 1）
+# 06 · 实现记录：读线路落地与阶段 2/3（tests green）
 
-本轮（文档先行之后的第一轮代码）目标与结论：**先把"连接 Zotero 读取信息"
-的线路端到端跑通**（官方仓库只读，全部改动在本项目内），PDF 管线搭起来、
-中间探针读取关键流程输出、Agent/LLM 与写路径只保留接口不接入。
+阶段 1（host 读线路 + 真实 Cordis 挂载）之后的两轮代码：**阶段 2 测试套件**
+（vitest 34 用例全绿）与 **阶段 3 client half**（`dsh.client` 声明 + 三栏视图
+注册 + esbuild bundle + jsdom 组件/注册测试）。官方仓库只读，全部改动在本项目内。
 
 ## 本轮完成
 
@@ -92,7 +92,7 @@ mount test OK: plugin activated in a real Cordis tree and returned Zotero paper 
 小观察（非阻断）：`searchItems` 空查询会混入附件行（标题显示为 "PDF"）；
 后续可默认过滤 `itemType === 'attachment'` 或按文档语义分页。
 
-## 已知边界（诚实记录）
+## 阶段 1 已知边界
 
 - PDF→Markdown 是启发式管线：单栏论文质量好；双栏/复杂表格会行交错或退化为
   数字行（smoke 尾部表格即此类）。图像抽取（页面渲染成图）是**保留端口**，
@@ -112,7 +112,46 @@ mount test OK: plugin activated in a real Cordis tree and returned Zotero paper 
 4. **settings 卡片**：配置目前只在组合层 `config`；Web 可编辑走后续 settings namespace。
 5. **图片**：页面渲染成图、图注启发式。
 
-## 下一步（按 docs/05-roadmap.md）
+## 阶段 2：测试套件（vitest，34 用例全绿）
 
-阶段 2：管线质量抽样比对 + 预算/错误码快照测试（真实 `dsh --profile web`
-挂载验证一并做，工具进 PTC/模型可见面）；随后阶段 3 起加 client half 与三栏视图。
+`pnpm test`（`tests/**/*.spec.{ts,tsx}`）：
+
+| 套件 | 覆盖 |
+|---|---|
+| `config.spec.ts` | resolveConfig 尾部斜杠归一 |
+| `model.spec.ts` | parseRef（URI/裸 key/拒绝小写与畸形）、creators/year/tags/abstract/keywords（extra Keywords 解析 + tags 回退） |
+| `probes.spec.ts` | JSONL 落盘、失败不阻断、trace 记录成功/失败并重抛 |
+| `pdf-pipeline.spec.ts` | pdf-lib 现场生成 PDF：跨页抽取、字符预算截断、空白页近零文本、无 PDF 附件/坏字节/超预算各命中稳定错误码、best-pdf 选择 |
+| `transport.spec.ts` | fetch stub：serverInfo 头解析（10→local-write / 7→readonly）、ECONNREFUSED→unreachable、403→local-api-disabled、检索 URL 拼装、file:// 读取与预算、非法 scheme |
+| `service.spec.ts` | 真实 Context + tools stub：4 个工具全部注册、不可达 Zotero 不抛、错误码映射（含 malformed-ref） |
+| `tests/client/apply.spec.ts` | client apply 经 slots 注册 conversation.view 'ideaget'（id/order/组件） |
+| `tests/client/ideaget-view.spec.tsx` | jsdom 渲染三栏（rail/stream/details）、空态、来源列表 |
+
+过程中修的两个实现缺陷：pdf.js 会 transfer 传入 buffer（重复解析同一字节报
+DataCloneError）→ 抽取入口做私有拷贝；`parseRef` 曾用 `/i` 放过 8 位小写串
+→ 收紧为纯 `[A-Z0-9]{8}`。
+
+## 阶段 3：client half（dsh.client + 三栏视图注册）
+
+- `package.json`：声明 `dsh.client`（platform web，inject 信息性列表）与
+  `exports["./client"]` → `lib/client.js`；构建 = tsc（host）+ esbuild（client）。
+- `tsconfig.client.json`：client half 独立 typecheck（bundler 解析 + tsx 扩展名，
+  仅 noEmit）；主 tsconfig 排除 `src/client`。
+- `src/client/index.ts`：`inject=['slots']` + `apply(ctx)`，经
+  `ctx.slots.inject('conversation.view', …)` 注册 `{name:'conversation.view',
+  id:'ideaget', order:70}` → 三栏视图组件。
+- `src/client/components/IdeagetView.tsx`：纯展示三栏（左 rail 来源列表 /
+  中 stream 占位 / 右 details 占位），文案待 locale 化（保留端口）。
+- `scripts/build-client.mjs`：esbuild，CJS（dsh client 模块宿主语义）、
+  external `react`/`react-dom`/`@deepseek-ai/*`。
+- **类型说明**：官方 client UI 包（ui-slots/ui-conversation）在 npm 上因 peer
+  闭包含未发布 workspace 包（`@deepseek-ai/dsh-compact`）无法独立安装，故
+  client 侧对 `slots` 服务用本地最小结构类型（运行时不变，宿主 web 树提供
+  真实服务与槽声明）。
+- bundle 在 dsh 式 CJS 求值器下验证：`exports: [apply, inject]` ✓。
+
+三栏视图的"左栏数据来自会话内投影 / 右栏详情 / 配置卡片 / Remote 状态"仍是
+保留端口（见 docs/03-frontend-design.md 数据流表）；本轮交付的是符合
+dsh-client 规范的注册、组件骨架与测试。
+
+## 阶段 2/3 已知边界

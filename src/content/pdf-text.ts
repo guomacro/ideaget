@@ -67,7 +67,10 @@ export async function extractPdfText(
   data: Uint8Array,
   budgetChars: number,
 ): Promise<PdfTextResult> {
-  const document = await getDocument({ data, useSystemFonts: true, isEvalSupported: false }).promise
+  // pdf.js may transfer the input buffer into its (fake) worker, detaching
+  // the caller's bytes; parse a private copy so callers can reuse their data.
+  const input = new Uint8Array(data)
+  const document = await getDocument({ data: input, useSystemFonts: true, isEvalSupported: false }).promise
   const paragraphs: string[] = []
   let chars = 0
   let truncated = false

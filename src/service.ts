@@ -82,6 +82,15 @@ function parentKeyOf(item: ZoteroItem): string | undefined {
   return match?.[1]
 }
 
+/** Parse a ref into a key, mapping malformed input onto the stable error code. */
+function parseKey(ref: string): string {
+  try {
+    return parseRef(ref)
+  } catch (error) {
+    throw new IdeagetError('malformed-ref', error instanceof Error ? error.message : String(error))
+  }
+}
+
 export class IdeagetService extends Service {
   static inject = ['tools']
 
@@ -141,7 +150,7 @@ export class IdeagetService extends Service {
   }
 
   async getItem(args: GetArgs, signal?: AbortSignal): Promise<GetResultView> {
-    const key = parseRef(args.ref)
+    const key = parseKey(args.ref)
     const item = await this.probes.trace('tool.get.item', () => this.transport.itemByKey(key, signal))
     const data = item.data
     const view: GetResultView = {
@@ -183,7 +192,7 @@ export class IdeagetService extends Service {
   }
 
   async readMarkdown(args: ReadMarkdownArgs, signal?: AbortSignal): Promise<PaperMarkdownView> {
-    const key = parseRef(args.ref)
+    const key = parseKey(args.ref)
     const maxChars = Math.min(Math.max(args.maxChars ?? 120_000, 2_000), 1_000_000)
     const item = await this.probes.trace('pipeline.item', () => this.transport.itemByKey(key, signal))
     let parent: ZoteroItem = item

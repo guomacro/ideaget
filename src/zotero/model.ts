@@ -55,9 +55,11 @@ export interface ZoteroItem {
 
 /** Normalize a user-supplied ref (`zotero://…/item/KEY`, bare `KEY`) to a key. */
 export function parseRef(ref: string): string {
-  const match = /^zotero:\/\/[^/]+\/\d+\/item\/([A-Z0-9]+)$/i.exec(ref.trim())
+  // Zotero keys are exactly 8 chars of uppercase letters and digits; both the
+  // URI form and the bare form accept only that alphabet.
+  const match = /^zotero:\/\/[^/]+\/\d+\/item\/([A-Z0-9]+)$/.exec(ref.trim())
   if (match !== null) return match[1]!
-  const bare = /^([A-Z0-9]{8})$/i.exec(ref.trim())
+  const bare = /^([A-Z0-9]{8})$/.exec(ref.trim())
   if (bare !== null) return bare[1]!
   throw new Error(`malformed Zotero ref: ${JSON.stringify(ref)}`)
 }
