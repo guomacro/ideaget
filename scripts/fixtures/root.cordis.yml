@@ -1,0 +1,3 @@
+# Minimal root for the stage-1 mount test: the tree is composed as patches,
+# exactly like a dsh profile root.
+[]
