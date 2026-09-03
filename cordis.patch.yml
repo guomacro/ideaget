@@ -1,0 +1,7 @@
+# ideaget bundle layer: inserts the single host row over the profile root.
+# The client half is reserved (not yet declared); it will be auto-discovered
+# by the web client module scan once `dsh.client` is added to package.json.
+- insert:
+    - id: ideaget
+      name: ideaget
+      config: {}
