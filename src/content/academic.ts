@@ -284,6 +284,20 @@ function repeatedEdgeLines(pages: PageData[]): Set<string> {
   return skip
 }
 
+/**
+ * When Zotero provides the authoritative front matter (meta.title), drop the
+ * parsed title/authors/abstract block from the body: body text starts at the
+ * first numbered Introduction heading (fallback: at the abstract heading).
+ */
+function trimToBodyStart(raw: string): string {
+  const lines = raw.split('\n')
+  const intro = lines.findIndex(line => /^\s*1\.?\s+introduction/i.test(line.trim()) || /^introduction$/i.test(line.trim()))
+  if (intro !== -1) return lines.slice(intro).join('\n')
+  const abstract = lines.findIndex(line => /^abstract$/i.test(line.trim()))
+  if (abstract !== -1) return lines.slice(abstract).join('\n')
+  return raw
+}
+
 export async function parsePdfToAcademic(
   bytes: Uint8Array,
   meta: AcademicPaperMeta,
@@ -351,7 +365,12 @@ export async function parsePdfToAcademic(
     rawChars += raw.length
     if (rawChars >= budget) { truncated = true; break }
   }
-  const rawText = rawPages.join('\n\n')
+  let rawText = rawPages.join('\n\n')
+  if (meta.title !== undefined && meta.title !== '') {
+    // Zotero metadata is authoritative for the header; trim the parsed block.
+    rawText = trimToBodyStart(rawText)
+    notes.push('front matter replaced by Zotero metadata (body starts at Introduction)')
+  }
   const sections = splitSections(rawText)
   const references = extractReferencesText(rawText)
   const text = clean(rawText)

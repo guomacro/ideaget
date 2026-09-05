@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import { clean, parsePdfToAcademic } from '../src/content/academic.js'
+import type { AcademicPaperMeta } from '../src/content/academic.js'
 
 async function twoColumnPdf(pages: number): Promise<Uint8Array> {
   const doc = await PDFDocument.create()
@@ -49,5 +50,51 @@ describe('parsePdfToAcademic (rules layout)', () => {
     const rightZero = doc.body.text.indexOf('RIGHT sentence number 0')
     expect(rightZero).toBeGreaterThan(leftLast)
     expect(doc.body.text).toContain('about left column content')
+  })
+})
+
+
+async function headerPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+  const page = doc.addPage([612, 792])
+  const lines = [
+    'SOME PARSED TITLE IN CAPS WORDS',
+    'First Author A.  Second Author B.',
+    'University of Example',
+    'ABSTRACT',
+    'This parsed abstract text should be replaced by the Zotero abstract.',
+    '1 Introduction',
+    'The introduction body starts here and must be the first body text.',
+  ]
+  lines.forEach((text, i) => page.drawText(text, { x: 60, y: 700 - i * 40, size: 10, font }))
+  return doc.save()
+}
+
+describe('authoritative Zotero front matter', () => {
+  it('replaces parsed header noise and starts the body at Introduction', async () => {
+    const bytes = await headerPdf()
+    const meta: AcademicPaperMeta = {
+      title: 'Real Zotero Title',
+      authors: ['First Author', 'Second Author'],
+      year: '2026',
+      abstract: 'Real Zotero abstract text.',
+      keywords: ['a', 'b'],
+    }
+    const doc = await parsePdfToAcademic(new Uint8Array(bytes), meta, { budgetChars: 100_000 })
+    expect(doc.paper.title).toBe('Real Zotero Title')
+    expect(doc.paper.abstract).toContain('Real Zotero abstract')
+    expect(doc.body.text).not.toContain('SOME PARSED TITLE')
+    expect(doc.body.text).not.toContain('University of Example')
+    expect(doc.body.text).not.toContain('parsed abstract text should be replaced')
+    expect(doc.body.text).toContain('The introduction body starts here')
+    const first = doc.body.sections.find(s => s.heading)
+    expect(first?.heading).toBe('1 Introduction')
+  })
+
+  it('keeps parsed body when no authoritative metadata exists', async () => {
+    const bytes = await headerPdf()
+    const doc = await parsePdfToAcademic(new Uint8Array(bytes), {}, { budgetChars: 100_000 })
+    expect(doc.body.text).toContain('SOME PARSED TITLE')
   })
 })
