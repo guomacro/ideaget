@@ -8,16 +8,19 @@
  * @module ideaget/service
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { bestPdfAttachment, pdfAttachmentToMarkdown, type PaperMeta } from './content/pipeline.js'
-import { extractReferences } from './content/references.js'
+import { parsePdfToAcademic } from './content/academic.js'
 import { Config as ConfigSchema, resolveConfig, type Config, type ResolvedConfig } from './config.js'
 import { IdeagetError } from './errors.js'
 import { ProbeLog } from './probes.js'
 import { ZoteroTransport } from './zotero/transport.js'
 import {
   abstractOf,
+  creatorsNames,
   creatorsText,
   itemRef,
   keywordsOf,
@@ -29,11 +32,13 @@ import {
   type ZoteroItem,
   type ZoteroItemData,
 } from './zotero/model.js'
+import { extractReferences } from './content/references.js'
 import { registerStatusCommand } from './command.js'
 import { registerCollectionReadTool } from './tools/collection-read.js'
 import { registerCollectionsTool } from './tools/collections.js'
 import { registerGetTool } from './tools/get.js'
 import { registerNoteAddTool } from './tools/note-add.js'
+import { registerPaperJsonTool } from './tools/paper-json.js'
 import { registerReadMdTool } from './tools/read-md.js'
 import { registerSearchTool } from './tools/search.js'
 import { registerStatusTool } from './tools/status.js'
@@ -200,6 +205,7 @@ export class IdeagetService extends Service {
     registerCollectionsTool(ctx, this)
     registerCollectionReadTool(ctx, this)
     registerNoteAddTool(ctx, this)
+    registerPaperJsonTool(ctx, this)
     mountWebRoutes(ctx, this)
   }
 
@@ -355,6 +361,61 @@ export class IdeagetService extends Service {
       chars: result.chars,
       truncated: result.truncated,
       attachmentName: result.attachmentName,
+    }
+  }
+
+  /**
+   * Parse one paper into an `academic-paper/v1` JSON artifact on disk
+   * (rules-based, no model) and return its summary. Full JSON is meant for
+   * RAG ingestion; the tool result stays small.
+   */
+  async produceAcademicArtifact(args: ReadMarkdownArgs & { artifactDir?: string }, signal?: AbortSignal):
+    Promise<{ artifactPath: string; title: string; pages: number; chars: number; sections: string[]; references: number; tables: number; figures: number; notes: string[] }> {
+    const key = parseKey(args.ref)
+    const maxChars = Math.min(Math.max(args.maxChars ?? 400_000, 2_000), 2_000_000)
+    const item = await this.probes.trace('academic.item', () => this.transport.itemByKey(key, signal))
+    let parent = item
+    let attachments: ZoteroItem[] = []
+    if (item.data.itemType === 'attachment') {
+      const parentKey = parentKeyOf(item)
+      if (parentKey !== undefined) parent = await this.transport.itemByKey(parentKey, signal)
+      attachments = [item]
+    } else {
+      attachments = await this.probes.trace('academic.attachments', () => this.transport.childrenOf(key, signal))
+    }
+    const data = parent.data
+    const found = bestPdfAttachment(attachments)
+    if (found === undefined) {
+      throw new IdeagetError('no-text-attachment', 'this item has no stored PDF to parse')
+    }
+    const bytes = await this.probes.trace('academic.bytes', () =>
+      this.transport.attachmentBytes(found.href, this.config.maxPdfBytes, signal))
+    const result = await this.probes.trace('academic.parse', () => parsePdfToAcademic(bytes, {
+      ref: itemRef(parent),
+      title: data.title,
+      authors: creatorsNames(data),
+      year: yearOf(data.date),
+      abstract: abstractOf(data),
+      keywords: keywordsOf(data),
+      doi: data.DOI,
+      sourceFile: found.item.data.filename,
+    }, { budgetChars: maxChars }))
+    const dir = (args.artifactDir ?? this.config.artifactDir) === ''
+      ? join(process.cwd(), '.ideaget', 'artifacts')
+      : (args.artifactDir ?? this.config.artifactDir)
+    mkdirSync(dir, { recursive: true })
+    const artifactPath = join(dir, `${key}.academic.json`)
+    writeFileSync(artifactPath, JSON.stringify(result, null, 2))
+    return {
+      artifactPath,
+      title: result.paper.title ?? data.title ?? key,
+      pages: result.body.pages,
+      chars: result.stats.chars,
+      sections: result.body.sections.filter(s => s.heading !== undefined).map(s => s.heading!),
+      references: result.references.length,
+      tables: result.stats.tables,
+      figures: result.stats.figures,
+      notes: result.notes,
     }
   }
 

@@ -25,6 +25,8 @@ export interface Config {
   probeVerbose: boolean
   /** Deny all write tools unless explicitly disabled. */
   readOnly: boolean
+  /** Directory for academic JSON artifacts; empty selects `<cwd>/.ideaget/artifacts`. */
+  artifactDir: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -35,6 +37,7 @@ export const Config: Schema<Config> = Schema.object({
   probeDir: Schema.string().default(''),
   probeVerbose: Schema.boolean().default(false),
   readOnly: Schema.boolean().default(true),
+  artifactDir: Schema.string().default(''),
 })
 
 /** Config with every schema default materialized. */

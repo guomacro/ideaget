@@ -64,6 +64,18 @@ export function parseRef(ref: string): string {
   throw new Error(`malformed Zotero ref: ${JSON.stringify(ref)}`)
 }
 
+/** Full creator names ("First Last", or raw name) in order. */
+export function creatorsNames(data: ZoteroItemData): string[] {
+  const names = (data.creators ?? []).map((creator) => {
+    if (creator.name !== undefined && creator.name !== '') return creator.name
+    const given = (creator.firstName ?? '').trim()
+    const last = (creator.lastName ?? '').trim()
+    if (given === '' && last === '') return ''
+    return [given, last].filter(part => part !== '').join(' ')
+  })
+  return names.filter(name => name !== '')
+}
+
 /** `creators` rendered as "A. Last, B. Last". */
 export function creatorsText(data: ZoteroItemData): string {
   const parts = (data.creators ?? []).map((creator) => {
