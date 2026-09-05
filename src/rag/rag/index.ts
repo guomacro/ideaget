@@ -201,8 +201,9 @@ export class RagIndexService extends Service {
     if (this.denseOn()) {
       try {
         index.vectors = await this.embedTexts(chunks.map(c => c.text))
-      } catch {
+      } catch (error) {
         index.vectors = undefined
+        this.lastDenseError = error instanceof Error ? error.message : String(error)
       }
     }
     this.index = index
