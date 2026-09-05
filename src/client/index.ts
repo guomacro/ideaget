@@ -39,5 +39,7 @@ export function apply(ctx: Context): void {
       name: 'conversation.view',
       id: 'ideaget',
       order: 70,
+      // View-tab label (locale-driven copy reserved, see docs/03).
+      label: 'ideaget',
     }, IdeagetView))
 }

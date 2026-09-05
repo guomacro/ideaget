@@ -30,10 +30,11 @@ describe('ideaget client apply', () => {
     apply(ctx)
     expect(captured).toHaveLength(1)
     expect(captured[0]!.name).toBe('conversation.view')
-    const registration = captured[0]!.registration as { name: string; id: string; order: number }
+    const registration = captured[0]!.registration as { name: string; id: string; order: number; label: string }
     expect(registration.name).toBe('conversation.view')
     expect(registration.id).toBe('ideaget')
     expect(registration.order).toBe(70)
+    expect(registration.label).toBe('ideaget')
     expect(captured[0]!.component).toBe(IdeagetView)
   })
 })
