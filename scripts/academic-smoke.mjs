@@ -22,7 +22,10 @@ import { parsePdfToAcademic } from '../lib/content/academic.js'
 const here = dirname(fileURLToPath(import.meta.url))
 const artifactsDir = join(here, '..', '.ideaget', 'artifacts')
 const transport = new ZoteroTransport('http://127.0.0.1:23119/api', 20000)
-const queries = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['LiLa-WAM', 'MagicAgent', 'IFNet', 'USV']
+const argv = process.argv.slice(2)
+const fileIndex = argv.indexOf('--file')
+const files = fileIndex === -1 ? [] : argv.slice(fileIndex + 1).filter(a => !a.startsWith('--'))
+const queries = files.length === 0 && argv.length > 0 ? argv : (files.length > 0 ? [] : ['LiLa-WAM', 'MagicAgent', 'IFNet'])
 
 async function resolvePaper(query) {
   const hits = await transport.searchItems({ query, qmode: 'titleCreatorYear', limit: 8 })
@@ -47,10 +50,29 @@ async function resolvePaper(query) {
 
 async function main() {
   mkdirSync(artifactsDir, { recursive: true })
-  for (const query of queries) {
-    console.log(`\n===== ${query} =====`)
+  const fileJobs = files.map(file => ({ kind: 'file', file }))
+  const queryJobs = queries.map(query => ({ kind: 'query', query }))
+  for (const job of fileJobs.length > 0 ? fileJobs : queryJobs) {
+    const label = job.kind === 'file' ? job.file.split('/').pop() ?? job.file : job.query
+    console.log(`\n===== ${label} =====`)
     try {
-      const paper = await resolvePaper(query)
+      if (job.kind === 'file') {
+        const { readFileSync } = await import('node:fs')
+        const bytes = new Uint8Array(readFileSync(job.file))
+        const doc = await parsePdfToAcademic(bytes, { sourceFile: label }, { budgetChars: 400_000 })
+        const path = join(artifactsDir, `file-${label.replace(/[^A-Za-z0-9]+/g, '-').slice(0, 60)}.academic.json`)
+        writeFileSync(path, JSON.stringify(doc, null, 2))
+        console.log(`  ${doc.body.pages} pages · ${doc.stats.chars} chars · paragraphs=${doc.body.paragraphs} · sections=${doc.body.sections.length} · refs=${doc.references.length} · tables=${doc.stats.tables} · figures=${doc.stats.figures}`)
+        console.log(`  artifact: ${path}`)
+        const heads = doc.body.sections.filter(s => s.heading).slice(0, 10).map(s => s.heading).join(' | ')
+        console.log(`  section heads: ${heads}`)
+        const paras = doc.body.text.split(/\n\s*\n/).filter(p => p.trim() !== '')
+        console.log('  --- head ---'); console.log('  ' + (paras.slice(0, 2).join(' ¶¶ ') ?? '').slice(0, 800).replace(/\n/g, ' '))
+        console.log('  --- middle ---'); console.log('  ' + ((paras[Math.floor(paras.length * 0.45)] ?? '')).slice(0, 360).replace(/\n/g, ' '))
+        console.log('  --- refs ---'); console.log('  ' + doc.references.slice(0, 2).join(' | ').slice(0, 300))
+        continue
+      }
+      const paper = await resolvePaper(job.query)
       if (paper === undefined) { console.log('no matching PDF found'); continue }
       const data = paper.parent.data
       const bytes = await transport.attachmentBytes(paper.href, 16 * 1024 * 1024)

@@ -2,4 +2,6 @@ packages:
   - .
 
 allowBuilds:
+  canvas: set this to true or false
   esbuild: true
+  tesseract.js: set this to true or false
