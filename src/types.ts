@@ -74,3 +74,32 @@ export interface PaperMarkdownView {
   truncated: boolean
   attachmentName?: string
 }
+
+export interface CollectionSummaryView {
+  ref: string
+  name: string
+  numItems?: number
+}
+
+export interface CollectionPaperView {
+  ref: string
+  title: string
+  creators?: string
+  year?: string
+  itemType: string
+  doi?: string
+  abstract?: string
+  keywords?: string[]
+  references?: string[]
+  body?: string
+  bodyTruncated?: boolean
+  /** Per-paper pipeline error (other papers still return). */
+  error?: string
+}
+
+export interface CollectionReadResultView {
+  collection: CollectionSummaryView
+  total: number
+  offset: number
+  items: CollectionPaperView[]
+}

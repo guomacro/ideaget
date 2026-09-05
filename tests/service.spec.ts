@@ -41,6 +41,9 @@ describe('IdeagetService under a real Context', () => {
       'ideaget_zotero_search',
       'ideaget_zotero_get',
       'ideaget_zotero_read_md',
+      'ideaget_zotero_collections',
+      'ideaget_zotero_collection_read',
+      'ideaget_zotero_note_add',
     ])
     await ctx.fiber.dispose()
   })

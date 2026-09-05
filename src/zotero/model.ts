@@ -122,3 +122,23 @@ export function itemRef(item: ZoteroItem): string {
 export function titleOf(data: ZoteroItemData): string {
   return data.title ?? `[untitled ${data.itemType ?? 'item'}]`
 }
+
+/** One Zotero collection row (list view). */
+export interface ZoteroCollection {
+  key: string
+  version: number
+  data: {
+    name: string
+    parentCollection?: string
+  }
+  meta?: { numItems?: number }
+}
+
+/** Parse a collection ref (`zotero://…/collection/KEY` or bare KEY) to a key. */
+export function parseCollectionRef(ref: string): string {
+  const match = /^zotero:\/\/[^/]+\/\d+\/collection\/([A-Z0-9]+)$/.exec(ref.trim())
+  if (match !== null) return match[1]!
+  const bare = /^([A-Z0-9]{8})$/.exec(ref.trim())
+  if (bare !== null) return bare[1]!
+  throw new Error(`malformed Zotero collection ref: ${JSON.stringify(ref)}`)
+}

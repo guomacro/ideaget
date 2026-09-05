@@ -10,7 +10,8 @@
 
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { pdfAttachmentToMarkdown, type PaperMeta } from './content/pipeline.js'
+import { bestPdfAttachment, pdfAttachmentToMarkdown, type PaperMeta } from './content/pipeline.js'
+import { extractReferences } from './content/references.js'
 import { Config as ConfigSchema, resolveConfig, type Config, type ResolvedConfig } from './config.js'
 import { IdeagetError } from './errors.js'
 import { ProbeLog } from './probes.js'
@@ -20,6 +21,7 @@ import {
   creatorsText,
   itemRef,
   keywordsOf,
+  parseCollectionRef,
   parseRef,
   tagsOf,
   titleOf,
@@ -28,11 +30,17 @@ import {
   type ZoteroItemData,
 } from './zotero/model.js'
 import { registerStatusCommand } from './command.js'
+import { registerCollectionReadTool } from './tools/collection-read.js'
+import { registerCollectionsTool } from './tools/collections.js'
 import { registerGetTool } from './tools/get.js'
+import { registerNoteAddTool } from './tools/note-add.js'
 import { registerReadMdTool } from './tools/read-md.js'
 import { registerSearchTool } from './tools/search.js'
 import { registerStatusTool } from './tools/status.js'
 import type {
+  CollectionPaperView,
+  CollectionReadResultView,
+  CollectionSummaryView,
   GetResultView,
   PaperMarkdownView,
   SearchItemView,
@@ -63,6 +71,21 @@ export interface ReadMarkdownArgs {
   maxChars?: number
 }
 
+export interface CollectionReadArgs {
+  collectionRef: string
+  includeAbstract?: boolean
+  includeKeywords?: boolean
+  includeFulltext?: boolean
+  includeReferences?: boolean
+  maxChars?: number
+  limit?: number
+}
+
+export interface NoteAddArgs {
+  ref: string
+  text: string
+}
+
 function metaOf(data: ZoteroItemData): PaperMeta {
   return {
     title: data.title,
@@ -90,6 +113,20 @@ function parseKey(ref: string): string {
   } catch (error) {
     throw new IdeagetError('malformed-ref', error instanceof Error ? error.message : String(error))
   }
+}
+
+/** Parse a collection key, mapping malformed input onto the stable error code. */
+function parseCollectionKey(ref: string): string {
+  try {
+    return parseCollectionRef(ref)
+  } catch (error) {
+    throw new IdeagetError('malformed-ref', error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** Minimal HTML escaping for note bodies. */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 /** One Web JSON route; structural slice of the host `webServer` service. */
@@ -160,6 +197,9 @@ export class IdeagetService extends Service {
     registerSearchTool(ctx, this)
     registerGetTool(ctx, this)
     registerReadMdTool(ctx, this)
+    registerCollectionsTool(ctx, this)
+    registerCollectionReadTool(ctx, this)
+    registerNoteAddTool(ctx, this)
     mountWebRoutes(ctx, this)
   }
 
@@ -316,6 +356,95 @@ export class IdeagetService extends Service {
       truncated: result.truncated,
       attachmentName: result.attachmentName,
     }
+  }
+
+  /** Every top-level collection with item counts (list view for pickers). */
+  async listCollections(signal?: AbortSignal): Promise<{ collections: CollectionSummaryView[] }> {
+    const rows = await this.probes.trace('collection.list', () => this.transport.listCollections(signal))
+    const collections = rows
+      .filter(row => typeof row.key === 'string' && row.key !== '')
+      .map(row => ({
+        ref: `zotero://user/0/collection/${row.key}`,
+        name: row.data?.name ?? row.key,
+        numItems: row.meta?.numItems,
+      }))
+    return { collections }
+  }
+
+  /** Read chosen fields of every paper inside one collection (bounded). */
+  async readCollectionPapers(args: CollectionReadArgs, signal?: AbortSignal): Promise<CollectionReadResultView> {
+    const key = parseCollectionKey(args.collectionRef)
+    const limit = Math.min(Math.max(args.limit ?? 10, 1), 20)
+    const maxChars = Math.min(Math.max(args.maxChars ?? 60_000, 2_000), 400_000)
+    const wantBody = args.includeFulltext === true || args.includeReferences === true
+    const rows = await this.probes.trace('collection.items', () =>
+      this.transport.collectionItems(key, limit, signal))
+    const papers = rows.filter(row => {
+      const kind = row.data?.itemType
+      return kind !== 'attachment' && kind !== 'note'
+    })
+    const items: CollectionPaperView[] = []
+    for (const [index, paper] of papers.entries()) {
+      const data = paper.data
+      const meta = metaOf(data)
+      const view: CollectionPaperView = {
+        ref: itemRef(paper),
+        title: meta.title ?? titleOf(data),
+        creators: meta.creators,
+        year: meta.year,
+        itemType: data.itemType ?? 'unknown',
+        doi: meta.doi,
+      }
+      if (args.includeAbstract !== false && meta.abstract !== '') view.abstract = meta.abstract
+      if (args.includeKeywords !== false && meta.keywords.length > 0) view.keywords = meta.keywords
+      if (wantBody) {
+        try {
+          const children = await this.probes.trace(`collection.children.${index}`, () =>
+            this.transport.childrenOf(paper.key, signal))
+          const result = await this.probes.trace(`collection.paper.${index}`, () =>
+            pdfAttachmentToMarkdown(meta, children, this.config.maxPdfBytes, maxChars, (href) =>
+              this.transport.attachmentBytes(href, this.config.maxPdfBytes, signal)))
+          if (args.includeFulltext === true) {
+            view.body = result.markdown
+            view.bodyTruncated = result.truncated
+          }
+          if (args.includeReferences === true) {
+            const refs = extractReferences(result.markdown)
+            if (refs.length > 0) view.references = refs
+          }
+        } catch (error) {
+          view.error = error instanceof IdeagetError ? `${error.code}: ${error.message}` : String(error)
+        }
+      }
+      items.push(view)
+    }
+    return {
+      collection: { ref: `zotero://user/0/collection/${key}`, name: key },
+      total: papers.length,
+      offset: 0,
+      items,
+    }
+  }
+
+  /** Zotero 10+ local-authorize write: create a child note under one item. */
+  async addNoteToItem(args: NoteAddArgs, signal?: AbortSignal): Promise<{ noteRef: string; remember: boolean }> {
+    if (this.config.readOnly) {
+      throw new IdeagetError('write-disabled', 'ideaget runs read-only; set config.readOnly=false to enable local writes')
+    }
+    const parentKey = parseKey(args.ref)
+    const info = await this.probes.trace('zotero.serverInfo', () => this.transport.serverInfo(signal))
+    if (!info.reachable || info.serverId === undefined) {
+      throw new IdeagetError('zotero-unreachable', 'Zotero local API unreachable; cannot authorize a write')
+    }
+    if (info.writeMode !== 'local-write') {
+      throw new IdeagetError('write-disabled', 'local item writes need Zotero 10+; the Web API channel is a reserved port')
+    }
+    const authorized = await this.probes.trace('zotero.authorize', () =>
+      this.transport.localAuthorize('ideaget', info.serverId!, signal))
+    const note = `<div>${escapeHtml(args.text)}</div>`
+    const noteKey = await this.probes.trace('zotero.createNote', () =>
+      this.transport.createChildNote(parentKey, note, authorized.key, info.serverId!, signal))
+    return { noteRef: `zotero://user/0/item/${noteKey}`, remember: authorized.remember }
   }
 }
 

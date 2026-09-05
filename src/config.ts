@@ -23,6 +23,8 @@ export interface Config {
   probeDir: string
   /** Echo every probe event to stderr (debugging aid). */
   probeVerbose: boolean
+  /** Deny all write tools unless explicitly disabled. */
+  readOnly: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -32,6 +34,7 @@ export const Config: Schema<Config> = Schema.object({
   maxPdfBytes: Schema.number().default(8 * 1024 * 1024),
   probeDir: Schema.string().default(''),
   probeVerbose: Schema.boolean().default(false),
+  readOnly: Schema.boolean().default(true),
 })
 
 /** Config with every schema default materialized. */
@@ -40,5 +43,5 @@ export type ResolvedConfig = Required<Config>
 /** Normalize raw config: strip a trailing slash from the base URL. */
 export function resolveConfig(raw: Config): ResolvedConfig {
   const base = raw.zoteroApiBaseUrl.replace(/\/+$/, '')
-  return { ...raw, zoteroApiBaseUrl: base }
+  return { ...raw, zoteroApiBaseUrl: base, readOnly: raw.readOnly ?? true }
 }
