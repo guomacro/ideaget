@@ -77,20 +77,51 @@ function dispatcherFor(url: string): ProxyAgent | null {
   return agent
 }
 
+function errorDetail(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const cause = (error as Error & { cause?: { code?: string; message?: string } }).cause
+  const causePart = cause?.code !== undefined ? ` (cause ${cause.code}${cause?.message ? `: ${cause.message}` : ''})` : ''
+  return `${error.message}${causePart}`
+}
+
+async function attemptFetch(url: string, init: RequestInit): Promise<Response> {
+  const response = await fetch(url, init)
+  if (!response.ok) {
+    throw new Error(`embedding endpoint ${url} returned ${response.status} ${response.statusText}`)
+  }
+  return response
+}
+
+/** POST with optional proxy; on proxy failure it falls back to a direct
+ *  attempt and reports both outcomes so misconfiguration is diagnosable. */
 async function postJson(url: string, body: unknown, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
   const dispatcher = dispatcherFor(url)
-  const init: RequestInit & { dispatcher?: unknown } = {
+  const baseInit: RequestInit & { dispatcher?: unknown } = {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   }
-  if (dispatcher !== null) init.dispatcher = dispatcher
-  const response = await fetch(url, init as RequestInit)
-  if (!response.ok) {
-    throw new Error(`embedding endpoint ${url} returned ${response.status} ${response.statusText}`)
+  const run = async (proxyDispatcher: unknown | null): Promise<Response> => {
+    const init: RequestInit = { ...baseInit }
+    if (proxyDispatcher !== null) (init as RequestInit & { dispatcher?: unknown }).dispatcher = proxyDispatcher
+    return attemptFetch(url, init)
   }
-  return response.json() as Promise<unknown>
+  if (dispatcher === null) {
+    return (await run(null)).json() as Promise<unknown>
+  }
+  try {
+    return (await run(dispatcher)).json() as Promise<unknown>
+  } catch (proxyError) {
+    try {
+      return (await run(null)).json() as Promise<unknown>
+    } catch (directError) {
+      const proxy = proxyUrlFromEnv()
+      throw new Error(
+        `embedding request failed via proxy ${JSON.stringify(proxy)}: ${errorDetail(proxyError)}; direct retry: ${errorDetail(directError)}`,
+      )
+    }
+  }
 }
 
 function urlProvider(options: EmbeddingProviderOptions): EmbeddingProvider {
