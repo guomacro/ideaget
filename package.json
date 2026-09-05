@@ -19,7 +19,23 @@
       "default": "./lib/index.js"
     },
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./rag/ingest": {
+      "types": "./lib/rag/ingest/index.d.ts",
+      "default": "./lib/rag/ingest/index.js"
+    },
+    "./rag/graph": {
+      "types": "./lib/rag/graph/index.d.ts",
+      "default": "./lib/rag/graph/index.js"
+    },
+    "./rag/rag": {
+      "types": "./lib/rag/index/index.d.ts",
+      "default": "./lib/rag/index/index.js"
+    },
+    "./rag/router": {
+      "types": "./lib/rag/router/index.d.ts",
+      "default": "./lib/rag/router/index.js"
+    }
   },
   "files": [
     "lib",

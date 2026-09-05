@@ -1,0 +1,28 @@
+# paper-rag preset (agent-presets cordis.yml dialect): one research session =
+# the ideaget host rows mounted per session. Copy/adjust per deployment.
+# Preset root discovery is configured in profile settings (agent-presets).
+- insert:
+    - id: ideaget
+      name: ideaget
+      config:
+        readOnly: true
+    - id: ideaget-ingest
+      name: 'ideaget/rag/ingest'
+      config:
+        chunkDir: ''
+        chunkChars: 2000
+    - id: ideaget-graph
+      name: 'ideaget/rag/graph'
+      config:
+        backend: json
+    - id: ideaget-rag
+      name: 'ideaget/rag/rag'
+      config:
+        embeddingProvider: ''
+        vectorBackend: ''
+    - id: ideaget-router
+      name: 'ideaget/rag/router'
+      config:
+        alpha: 0.4
+        beta: 0.3
+        gamma: 0.3

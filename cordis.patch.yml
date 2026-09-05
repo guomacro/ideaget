@@ -1,7 +1,21 @@
-# ideaget bundle layer: inserts the single host row over the profile root.
-# The client half is reserved (not yet declared); it will be auto-discovered
-# by the web client module scan once `dsh.client` is added to package.json.
+# ideaget bundle layer. Row ids are stable patch targets (user layers override
+# by id). The paper-RAG framework rows are skeleton plugins mounted as their
+# own entries; their Config values are defaults to be refined later.
 - insert:
     - id: ideaget
       name: ideaget
+      config: {}
+
+    # ── paper-RAG framework (skeleton stage) ──
+    - id: ideaget-ingest
+      name: 'ideaget/rag/ingest'
+      config: {}
+    - id: ideaget-graph
+      name: 'ideaget/rag/graph'
+      config: {}
+    - id: ideaget-rag
+      name: 'ideaget/rag/rag'
+      config: {}
+    - id: ideaget-router
+      name: 'ideaget/rag/router'
       config: {}
