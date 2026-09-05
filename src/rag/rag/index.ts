@@ -37,6 +37,14 @@ export interface RagIndexConfig {
   chunkOverlap: number
   /** Default top-K for retrieval. */
   defaultTopK: number
+  /** Chunks per embedding request. */
+  embedBatch: number
+  /** Per embedding request timeout (ms). */
+  embedTimeoutMs: number
+  /** Dense (cosine) weight in fusion when vectors exist. */
+  denseWeight: number
+  /** Sparse (BM25) weight in fusion when vectors exist. */
+  sparseWeight: number
 }
 
 export const Config: Schema<RagIndexConfig> = Schema.object({
@@ -49,6 +57,10 @@ export const Config: Schema<RagIndexConfig> = Schema.object({
   chunkChars: Schema.natural().default(2000),
   chunkOverlap: Schema.natural().default(100),
   defaultTopK: Schema.natural().default(8),
+  embedBatch: Schema.natural().default(16),
+  embedTimeoutMs: Schema.natural().default(120000),
+  denseWeight: Schema.number().default(0.6),
+  sparseWeight: Schema.number().default(0.4),
 })
 
 interface IndexedPaper { key: string; title?: string; ref?: string }
@@ -57,6 +69,8 @@ interface CorpusIndex {
   version: 1
   papers: IndexedPaper[]
   chunks: RagChunk[]
+  /** Dense vectors aligned to chunks; present when an endpoint is configured. */
+  vectors?: number[][]
 }
 
 interface TokenStats { df: Map<string, number>; docLen: number[] }
@@ -102,6 +116,10 @@ export class RagIndexService extends Service {
       chunkChars: config.chunkChars ?? 2000,
       chunkOverlap: config.chunkOverlap ?? 100,
       defaultTopK: config.defaultTopK ?? 8,
+      embedBatch: config.embedBatch ?? 16,
+      embedTimeoutMs: config.embedTimeoutMs ?? 120000,
+      denseWeight: config.denseWeight ?? 0.6,
+      sparseWeight: config.sparseWeight ?? 0.4,
     }
     mkdirSync(this.config.indexDir, { recursive: true })
     registerRagTools(ctx, this)
@@ -144,7 +162,15 @@ export class RagIndexService extends Service {
         }
       }
     }
-    this.index = { version: 1, papers, chunks }
+    const index: CorpusIndex = { version: 1, papers, chunks }
+    if (this.denseOn()) {
+      try {
+        index.vectors = await this.embedTexts(chunks.map(c => c.text))
+      } catch {
+        index.vectors = undefined
+      }
+    }
+    this.index = index
     this.stats = computeStats(chunks)
     writeFileSync(join(this.config.indexDir, 'index.json'), JSON.stringify(this.index, null, 2))
     return { papers: papers.length, chunks: chunks.length }
@@ -166,7 +192,7 @@ export class RagIndexService extends Service {
     void this.indexCorpus()
   }
 
-  /** BM25 hybrid search over chunks (dense fusion lands with the store). */
+  /** Hybrid search: BM25 always; cosine fusion when dense vectors exist. */
   async search(query: string, layer: QueryLayer, topK: number = this.config.defaultTopK): Promise<RagHit[]> {
     void layer
     this.ensureIndex()
@@ -181,7 +207,7 @@ export class RagIndexService extends Service {
       const n = df.get(term) ?? 0
       return Math.log(1 + (docCount - n + 0.5) / (n + 0.5))
     }
-    const scored: { index: number; score: number }[] = []
+    const sparse: { index: number; score: number }[] = []
     for (let i = 0; i < chunks.length; i++) {
       const doc = tokensOf(chunks[i]!.text)
       let score = 0
@@ -190,22 +216,59 @@ export class RagIndexService extends Service {
         if (tf === 0) continue
         score += idf(term) * (tf * (K1 + 1)) / (tf + K1 * (1 - B + B * (docLen[i] ?? 1) / avgdl))
       }
-      if (score > 0) scored.push({ index: i, score })
+      if (score > 0) sparse.push({ index: i, score })
     }
-    scored.sort((a, b) => b.score - a.score)
     const paperByKey = new Map(this.index.papers.map(p => [p.key, p]))
-    return scored.slice(0, Math.max(1, Math.min(topK, 50))).map(hit => {
+
+    const dense = this.index.vectors
+    let denseError: string | undefined
+    let queryVector: number[] | undefined
+    if (this.denseOn() && dense !== undefined && dense.length === chunks.length) {
+      try {
+        queryVector = (await this.embedTexts([query]))[0]
+      } catch (error) {
+        denseError = error instanceof Error ? error.message : String(error)
+      }
+    } else if (this.denseOn() && dense === undefined) {
+      denseError = 'vectors missing - run indexCorpus with the embedding endpoint configured'
+    }
+    const maxSparse = sparse.length > 0 ? Math.max(...sparse.map(s => s.score)) : 0
+    const scored = sparse.map(s => ({ index: s.index, score: s.score }))
+    if (queryVector !== undefined && dense !== undefined) {
+      for (const s of scored) {
+        const cos = cosine(queryVector!, dense[s.index]!)
+        const cosN = (cos + 1) / 2
+        const bm25N = maxSparse > 0 ? s.score / maxSparse : 0
+        s.score = this.config.denseWeight * cosN + this.config.sparseWeight * bm25N
+      }
+      scored.sort((a, b) => b.score - a.score)
+    } else {
+      scored.sort((a, b) => b.score - a.score)
+    }
+    const source = queryVector !== undefined ? 'fused' : 'bm25'
+    const hits = scored.slice(0, Math.max(1, Math.min(topK, 50))).map(hit => {
       const chunk = chunks[hit.index]!
       const paper = paperByKey.get(chunk.paperKey)
       return {
         chunk: { ...chunk, text: excerpt(chunk.text, 600) },
         node: undefined,
         score: Math.round(hit.score * 1000) / 1000,
-        source: 'bm25' as const,
+        source: source as 'fused' | 'bm25',
         title: paper?.title,
         ref: paper?.ref,
       }
     })
+    this.lastDenseError = denseError
+    return hits
+  }
+
+  /** Reason the dense leg is (or is not) active; read after search(). */
+  denseDiagnosis(): { on: boolean; error?: string; vectors: boolean } {
+    return {
+      on: this.denseOn(),
+      error: this.lastDenseError,
+      vectors: (this.index?.vectors?.length ?? 0) > 0,
+    }
   }
 
   status(): { papers: number; chunks: number; indexed: boolean } {
@@ -215,6 +278,45 @@ export class RagIndexService extends Service {
       chunks: this.index?.chunks.length ?? 0,
       indexed: this.index !== null,
     }
+  }
+
+  private lastDenseError: string | undefined
+
+  private denseOn(): boolean {
+    return this.config.embeddingProvider !== '' && this.config.embeddingUrl !== ''
+  }
+
+  /** Embed a list of texts through the configured endpoint (OpenAI-compatible
+   *  /v1/embeddings; batch request, ordered by response index). */
+  async embedTexts(texts: string[]): Promise<number[][]> {
+    if (!this.denseOn()) throw new Error('embedding provider is not configured')
+    const vectors: number[][] = []
+    for (let start = 0; start < texts.length; start += this.config.embedBatch) {
+      const batch = texts.slice(start, start + this.config.embedBatch)
+      const url = this.config.embeddingUrl
+      const timeout = AbortSignal.timeout(this.config.embedTimeoutMs)
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: this.config.embeddingModel, input: batch }),
+        signal: timeout,
+      })
+      if (!response.ok) {
+        throw new Error(`embedding endpoint ${url} returned ${response.status} ${response.statusText}`)
+      }
+      const payload = (await response.json()) as { data?: { index?: number; embedding?: number[] }[] }
+      const rows = payload.data ?? []
+      rows.sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+      for (let i = 0; i < batch.length; i++) {
+        const row = rows[i]
+        const embedding = row?.embedding
+        if (embedding === undefined || embedding.length === 0) {
+          throw new Error(`embedding endpoint returned no vector for batch item ${i}`)
+        }
+        vectors.push(embedding)
+      }
+    }
+    return vectors
   }
 }
 
@@ -251,6 +353,18 @@ function computeStats(chunks: RagChunk[]): TokenStats {
 
 function excerpt(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`
+}
+
+function cosine(a: number[], b: number[]): number {
+  let dot = 0
+  let na = 0
+  let nb = 0
+  for (let i = 0; i < a.length && i < b.length; i++) {
+    dot += a[i]! * b[i]!
+    na += a[i]! * a[i]!
+    nb += b[i]! * b[i]!
+  }
+  return na === 0 || nb === 0 ? 0 : dot / Math.sqrt(na * nb)
 }
 
 /** Model-facing tools of the retrieval index. */

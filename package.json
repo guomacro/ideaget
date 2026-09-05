@@ -29,8 +29,8 @@
       "default": "./lib/rag/graph/index.js"
     },
     "./rag/rag": {
-      "types": "./lib/rag/index/index.d.ts",
-      "default": "./lib/rag/index/index.js"
+      "types": "./lib/rag/rag/index.d.ts",
+      "default": "./lib/rag/rag/index.js"
     },
     "./rag/router": {
       "types": "./lib/rag/router/index.d.ts",

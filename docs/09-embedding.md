@@ -37,3 +37,10 @@ ollama pull qwen3-embedding:8b
 `IDEAGET_EMBEDDING_PROVIDER=url` / `IDEAGET_EMBEDDING_URL=…` /
 `IDEAGET_EMBEDDING_MODEL=…`；RAG 插件构造时读取，`embeddingProvider===''`
 时保持 BM25-only（默认）。
+
+## 状态更新（2026-09）
+
+vLLM 尝试在 GPU 上加载 Qwen3-Embedding-0.6B 失败（显存不足）。dense 腿代码已
+就位但**默认关闭**（`.env` 中 `IDEAGET_EMBEDDING_PROVIDER=` 空）；此时检索纯
+BM25。待 GPU/CPU 服务可用时：把 provider 置为 `url` 并确认 8080 可
+`curl /v1/embeddings`，再跑一次 `indexCorpus()` 生成向量即可启用余弦融合。
