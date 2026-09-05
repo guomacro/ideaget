@@ -7,8 +7,14 @@
  *
  * - `url`    : OpenAI-compatible `POST {model, input}` (vLLM / Infinity / TEI / Ollama).
  * - `gemini` : Google Generative Language `batchEmbedContents` (cloud).
+ *
+ * Proxy: non-loopback targets honor `HTTPS_PROXY`/`http_proxy` (and their
+ * lowercase forms) through undici `ProxyAgent`; loopback endpoints (local
+ * vLLM etc.) always connect directly.
  * @module ideaget/rag/embedding
  */
+
+import { ProxyAgent } from 'undici'
 
 export interface EmbeddingProviderOptions {
   provider: '' | 'url' | 'gemini'
@@ -45,13 +51,42 @@ export function createEmbeddingProvider(options: EmbeddingProviderOptions): Embe
     : urlProvider(options)
 }
 
+function proxyUrlFromEnv(): string {
+  return process.env.HTTPS_PROXY
+    ?? process.env.https_proxy
+    ?? process.env.HTTP_PROXY
+    ?? process.env.http_proxy
+    ?? ''
+}
+
+function isLoopback(url: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(url)
+}
+
+const proxyAgents = new Map<string, ProxyAgent>()
+
+/** Dispatcher for one request target; null when no proxy or loopback. */
+function dispatcherFor(url: string): ProxyAgent | null {
+  const proxy = proxyUrlFromEnv()
+  if (proxy === '' || isLoopback(url)) return null
+  let agent = proxyAgents.get(proxy)
+  if (agent === undefined) {
+    agent = new ProxyAgent(proxy)
+    proxyAgents.set(proxy, agent)
+  }
+  return agent
+}
+
 async function postJson(url: string, body: unknown, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
-  const response = await fetch(url, {
+  const dispatcher = dispatcherFor(url)
+  const init: RequestInit & { dispatcher?: unknown } = {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
-  })
+  }
+  if (dispatcher !== null) init.dispatcher = dispatcher
+  const response = await fetch(url, init as RequestInit)
   if (!response.ok) {
     throw new Error(`embedding endpoint ${url} returned ${response.status} ${response.statusText}`)
   }
