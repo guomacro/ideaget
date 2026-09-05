@@ -9,6 +9,7 @@
  */
 
 import { Service, type Context } from '@deepseek-ai/cordis'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { pdfAttachmentToMarkdown, type PaperMeta } from './content/pipeline.js'
 import { Config as ConfigSchema, resolveConfig, type Config, type ResolvedConfig } from './config.js'
 import { IdeagetError } from './errors.js'
@@ -91,6 +92,52 @@ function parseKey(ref: string): string {
   }
 }
 
+/** One Web JSON route; structural slice of the host `webServer` service. */
+interface WebRouteLike {
+  kind: 'prefix'
+  path: string
+  handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+}
+
+/** Browser JSON routes the ideaget workbench consumes (read-only). */
+const WEB_API_PATH = '/ideaget'
+
+/** Normalize raw Zotero items into the compact paper-list view. */
+function mapItems(items: ZoteroItem[]): SearchItemView[] {
+  return items.map((item) => ({
+    ref: itemRef(item),
+    title: titleOf(item.data),
+    creators: creatorsText(item.data),
+    year: yearOf(item.data.date),
+    itemType: item.data.itemType ?? 'unknown',
+    attachmentType: item.data.itemType === 'attachment' ? item.data.contentType : undefined,
+  }))
+}
+
+/** Write one JSON response. */
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+  res.end(JSON.stringify(payload))
+}
+
+/**
+ * Register the `/ideaget` Web JSON routes when a web server is composed.
+ * Optional-inject form keeps the plugin loadable in headless compositions.
+ */
+function mountWebRoutes(ctx: Context, service: IdeagetService): void {
+  ctx.inject(['webServer'], (webCtx) => {
+    const server = (webCtx as unknown as { webServer: { register(route: WebRouteLike): () => void } }).webServer
+    return server.register({
+      kind: 'prefix',
+      path: WEB_API_PATH,
+      handler: (req, res) => void service.handleIdeagetWeb(req, res),
+    })
+  })
+}
+
 export class IdeagetService extends Service {
   static inject = ['tools']
 
@@ -113,6 +160,7 @@ export class IdeagetService extends Service {
     registerSearchTool(ctx, this)
     registerGetTool(ctx, this)
     registerReadMdTool(ctx, this)
+    mountWebRoutes(ctx, this)
   }
 
   /** Probe directory actually in use ('' means disabled; probes never fail). */
@@ -138,15 +186,51 @@ export class IdeagetService extends Service {
     const limit = Math.min(Math.max(args.limit ?? 5, 1), this.config.maxSearchResults)
     const items = await this.probes.trace('tool.search', () =>
       this.transport.searchItems({ query: args.query, qmode, limit, signal }))
-    const view: SearchItemView[] = items.map((item) => ({
-      ref: itemRef(item),
-      title: titleOf(item.data),
-      creators: creatorsText(item.data),
-      year: yearOf(item.data.date),
-      itemType: item.data.itemType ?? 'unknown',
-      attachmentType: item.data.itemType === 'attachment' ? item.data.contentType : undefined,
-    }))
-    return { query: args.query, qmode, total: items.length, items: view }
+    return { query: args.query, qmode, total: items.length, items: mapItems(items) }
+  }
+
+  /**
+   * Paper-list JSON endpoint for the workbench left rail: latest library rows
+   * with an empty query, metadata search otherwise. Attachment rows are
+   * filtered out of the titles list.
+   */
+  async webPapers(query: string, limit: number, signal?: AbortSignal): Promise<{ items: SearchItemView[]; total: number }> {
+    const bounded = Math.min(Math.max(limit, 1), 50)
+    const items = await this.probes.trace('web.papers', () =>
+      this.transport.searchItems({ query, qmode: query.trim() === '' ? 'titleCreatorYear' : 'everything', limit: bounded, signal }))
+    const papers = items.filter(item => item.data.itemType !== 'attachment')
+    return { items: mapItems(papers), total: papers.length }
+  }
+
+  /** Handle one `/ideaget` Web request (GET JSON API; read-only). */
+  async handleIdeagetWeb(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      if ((req.method ?? 'GET').toUpperCase() !== 'GET') {
+        sendJson(res, 405, { error: { code: 'method-not-allowed', message: 'ideaget Web API is read-only GET' } })
+        return
+      }
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const [segment] = url.pathname.slice(WEB_API_PATH.length).split('/').filter(Boolean)
+      if (segment === 'status') {
+        sendJson(res, 200, await this.zoteroStatus())
+        return
+      }
+      if (segment === 'papers') {
+        const query = (url.searchParams.get('q') ?? '').slice(0, 200)
+        const limit = Number(url.searchParams.get('limit') ?? '20')
+        const result = await this.webPapers(query, Number.isFinite(limit) ? limit : 20)
+        sendJson(res, 200, { query, ...result })
+        return
+      }
+      sendJson(res, 404, { error: { code: 'not-found', message: `unknown ideaget endpoint ${JSON.stringify(segment ?? '')}` } })
+    } catch (error) {
+      sendJson(res, 500, {
+        error: {
+          code: error instanceof IdeagetError ? error.code : 'internal',
+          message: error instanceof Error ? error.message : String(error),
+        },
+      })
+    }
   }
 
   async getItem(args: GetArgs, signal?: AbortSignal): Promise<GetResultView> {

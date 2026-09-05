@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import { apply, inject } from '../../src/client/index.ts'
-import { IdeagetView } from '../../src/client/components/IdeagetView.tsx'
+import { IdeagetStandaloneApp } from '../../src/client/components/IdeagetStandaloneApp.tsx'
 
 interface Captured {
   name: string
@@ -14,7 +14,7 @@ describe('ideaget client apply', () => {
     expect(inject).toEqual(['slots'])
   })
 
-  it('registers the ideaget conversation view target through slots', () => {
+  it('registers the standalone workbench into the top-level shell.overlay slot', () => {
     const captured: Captured[] = []
     const fakeSlots = {
       inject(name: string, contribute: () => unknown): () => void {
@@ -29,12 +29,11 @@ describe('ideaget client apply', () => {
     const ctx = { slots: fakeSlots } as unknown as Context
     apply(ctx)
     expect(captured).toHaveLength(1)
-    expect(captured[0]!.name).toBe('conversation.view')
-    const registration = captured[0]!.registration as { name: string; id: string; order: number; label: string }
-    expect(registration.name).toBe('conversation.view')
-    expect(registration.id).toBe('ideaget')
-    expect(registration.order).toBe(70)
-    expect(registration.label).toBe('ideaget')
-    expect(captured[0]!.component).toBe(IdeagetView)
+    expect(captured[0]!.name).toBe('shell.overlay')
+    const registration = captured[0]!.registration as { name: string; id: string; order: number }
+    expect(registration.name).toBe('shell.overlay')
+    expect(registration.id).toBe('ideaget-workbench')
+    expect(registration.order).toBe(1000)
+    expect(captured[0]!.component).toBe(IdeagetStandaloneApp)
   })
 })

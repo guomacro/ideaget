@@ -1,24 +1,19 @@
 /**
- * ideaget browser half: registers the `ideaget` conversation view target
- * (the three-pane research workbench) through the standard slots mechanism.
- * The slot declaration (`conversation.view`) and the `slots` service belong
- * to the host web composition at runtime; this entry only contributes.
+ * ideaget browser half: mounts the standalone ideaget workbench — a
+ * full-viewport replacement UI (left Zotero papers / middle chat / right
+ * ideas) — into the top-level `shell.overlay` slot. It is deliberately
+ * independent: no official session/conversation sync; the middle and right
+ * columns are front-end scaffolds until the agent/backend ports land.
  *
- * Typing note: the official client UI packages cannot be installed as
- * standalone devDependencies (their peer closure includes unpublished
- * workspace packages), so the `slots` service is typed here against minimal
- * local structural contracts. Runtime behavior is unchanged — the host web
- * tree provides the real service and slot declarations.
- *
- * Reserved ports (not wired yet, see docs/03-frontend-design.md): locale
- * dictionaries, the Plugins-tab settings card, and the Typert Remote status
- * namespace — the left rail's live data arrives through the view's inject
- * face once the host Remote is mounted.
+ * The left rail's Zotero data comes from the host Web JSON route `/ideaget`
+ * (registered by the host half). Typing note: the official client UI slot
+ * packages cannot be installed standalone (unpublished peer closure), so the
+ * `slots` service is typed structurally here — runtime behavior is unchanged.
  * @module ideaget/client
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { IdeagetView } from './components/IdeagetView.tsx'
+import { IdeagetStandaloneApp } from './components/IdeagetStandaloneApp.tsx'
 
 export const inject = ['slots']
 
@@ -29,17 +24,15 @@ export interface SlotsService {
 }
 
 /**
- * Mount the ideaget conversation view.
+ * Mount the ideaget workbench overlay.
  * @param ctx - the browser plugin context (typed loosely; see module doc).
  */
 export function apply(ctx: Context): void {
   const slots = (ctx as unknown as { slots: SlotsService }).slots
-  slots.inject('conversation.view', () =>
+  slots.inject('shell.overlay', () =>
     slots.register({
-      name: 'conversation.view',
-      id: 'ideaget',
-      order: 70,
-      // View-tab label (locale-driven copy reserved, see docs/03).
-      label: 'ideaget',
-    }, IdeagetView))
+      name: 'shell.overlay',
+      id: 'ideaget-workbench',
+      order: 1000,
+    }, IdeagetStandaloneApp))
 }
