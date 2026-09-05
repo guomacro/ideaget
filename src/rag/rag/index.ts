@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { QueryLayer, RagChunk, RagHit } from '../shared.js'
+import { createEmbeddingProvider, readiness, type EmbeddingProvider } from '../embedding/index.js'
 
 export interface RagIndexConfig {
   /** Embedding provider id: '' | 'url' (endpoint read from env/Config). */
@@ -45,6 +46,12 @@ export interface RagIndexConfig {
   denseWeight: number
   /** Sparse (BM25) weight in fusion when vectors exist. */
   sparseWeight: number
+  /** Gemini model id (env IDEAGET_GEMINI_MODEL; default gemini-embedding-001). */
+  geminiModel: string
+  /** Gemini API key (env GEMINI_API_KEY or GOOGLE_API_KEY). */
+  geminiApiKey: string
+  /** Gemini API base (env IDEAGET_GEMINI_BASE_URL). */
+  geminiBaseUrl: string
 }
 
 export const Config: Schema<RagIndexConfig> = Schema.object({
@@ -61,6 +68,9 @@ export const Config: Schema<RagIndexConfig> = Schema.object({
   embedTimeoutMs: Schema.natural().default(120000),
   denseWeight: Schema.number().default(0.6),
   sparseWeight: Schema.number().default(0.4),
+  geminiModel: Schema.string().default('gemini-embedding-001'),
+  geminiApiKey: Schema.string().default(''),
+  geminiBaseUrl: Schema.string().default('https://generativelanguage.googleapis.com/v1beta'),
 })
 
 interface IndexedPaper { key: string; title?: string; ref?: string }
@@ -100,8 +110,10 @@ export class RagIndexService extends Service {
   static Config = Config
 
   private readonly config: RagIndexConfig
+  private readonly embedder: EmbeddingProvider | null
   private index: CorpusIndex | null = null
   private stats: TokenStats | null = null
+  private lastDenseError: string | undefined
 
   constructor(ctx: Context, config: Partial<RagIndexConfig> = {}) {
     super(ctx, 'ragIndex')
@@ -120,6 +132,29 @@ export class RagIndexService extends Service {
       embedTimeoutMs: config.embedTimeoutMs ?? 120000,
       denseWeight: config.denseWeight ?? 0.6,
       sparseWeight: config.sparseWeight ?? 0.4,
+      geminiModel: pick(env.IDEAGET_GEMINI_MODEL, config.geminiModel, 'gemini-embedding-001'),
+      geminiApiKey: pick(env.GEMINI_API_KEY, pick(env.GOOGLE_API_KEY, config.geminiApiKey, ''), ''),
+      geminiBaseUrl: pick(env.IDEAGET_GEMINI_BASE_URL, config.geminiBaseUrl, 'https://generativelanguage.googleapis.com/v1beta'),
+    }
+    this.embedder = createEmbeddingProvider({
+      provider: this.config.embeddingProvider as '' | 'url' | 'gemini',
+      url: this.config.embeddingUrl,
+      model: this.config.embeddingProvider === 'gemini' ? this.config.geminiModel : this.config.embeddingModel,
+      batch: this.config.embedBatch,
+      timeoutMs: this.config.embedTimeoutMs,
+      apiKey: this.config.geminiApiKey,
+      geminiBaseUrl: this.config.geminiBaseUrl,
+    })
+    if (this.config.embeddingProvider !== '' && this.embedder === null) {
+      this.lastDenseError = readiness({
+        provider: this.config.embeddingProvider as '' | 'url' | 'gemini',
+        url: this.config.embeddingUrl,
+        model: this.config.embeddingModel,
+        batch: this.config.embedBatch,
+        timeoutMs: this.config.embedTimeoutMs,
+        apiKey: this.config.geminiApiKey,
+        geminiBaseUrl: this.config.geminiBaseUrl,
+      }) ?? 'embedding provider unavailable'
     }
     mkdirSync(this.config.indexDir, { recursive: true })
     registerRagTools(ctx, this)
@@ -132,8 +167,8 @@ export class RagIndexService extends Service {
   embedding(): { provider: string; url: string; model: string } {
     return {
       provider: this.config.embeddingProvider,
-      url: this.config.embeddingUrl,
-      model: this.config.embeddingModel,
+      url: this.config.embeddingProvider === 'gemini' ? this.config.geminiBaseUrl : this.config.embeddingUrl,
+      model: this.config.embeddingProvider === 'gemini' ? this.config.geminiModel : this.config.embeddingModel,
     }
   }
 
@@ -263,8 +298,9 @@ export class RagIndexService extends Service {
   }
 
   /** Reason the dense leg is (or is not) active; read after search(). */
-  denseDiagnosis(): { on: boolean; error?: string; vectors: boolean } {
+  denseDiagnosis(): { provider: string; on: boolean; error?: string; vectors: boolean } {
     return {
+      provider: this.config.embeddingProvider,
       on: this.denseOn(),
       error: this.lastDenseError,
       vectors: (this.index?.vectors?.length ?? 0) > 0,
@@ -280,43 +316,16 @@ export class RagIndexService extends Service {
     }
   }
 
-  private lastDenseError: string | undefined
 
   private denseOn(): boolean {
-    return this.config.embeddingProvider !== '' && this.config.embeddingUrl !== ''
+    return this.embedder !== null
   }
 
-  /** Embed a list of texts through the configured endpoint (OpenAI-compatible
-   *  /v1/embeddings; batch request, ordered by response index). */
+  /** Embed texts through the active provider (contract-identical across
+   *  backends so downstream fusion results stay consistent). */
   async embedTexts(texts: string[]): Promise<number[][]> {
-    if (!this.denseOn()) throw new Error('embedding provider is not configured')
-    const vectors: number[][] = []
-    for (let start = 0; start < texts.length; start += this.config.embedBatch) {
-      const batch = texts.slice(start, start + this.config.embedBatch)
-      const url = this.config.embeddingUrl
-      const timeout = AbortSignal.timeout(this.config.embedTimeoutMs)
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: this.config.embeddingModel, input: batch }),
-        signal: timeout,
-      })
-      if (!response.ok) {
-        throw new Error(`embedding endpoint ${url} returned ${response.status} ${response.statusText}`)
-      }
-      const payload = (await response.json()) as { data?: { index?: number; embedding?: number[] }[] }
-      const rows = payload.data ?? []
-      rows.sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-      for (let i = 0; i < batch.length; i++) {
-        const row = rows[i]
-        const embedding = row?.embedding
-        if (embedding === undefined || embedding.length === 0) {
-          throw new Error(`embedding endpoint returned no vector for batch item ${i}`)
-        }
-        vectors.push(embedding)
-      }
-    }
-    return vectors
+    if (this.embedder === null) throw new Error('embedding provider is not configured')
+    return this.embedder.embedTexts(texts)
   }
 }
 

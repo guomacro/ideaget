@@ -44,3 +44,32 @@ vLLM 尝试在 GPU 上加载 Qwen3-Embedding-0.6B 失败（显存不足）。den
 就位但**默认关闭**（`.env` 中 `IDEAGET_EMBEDDING_PROVIDER=` 空）；此时检索纯
 BM25。待 GPU/CPU 服务可用时：把 provider 置为 `url` 并确认 8080 可
 `curl /v1/embeddings`，再跑一次 `indexCorpus()` 生成向量即可启用余弦融合。
+
+## 云端线路：Google Gemini Embedding（接口 + gateway）
+
+`src/rag/embedding/index.ts` 提供统一的 **EmbeddingProvider 接口**（唯一方法
+`embedTexts(texts): Promise<number[][]>`，向量与输入一一对应）：
+
+| provider id | gateway/接口 | 说明 |
+|---|---|---|
+| `url` | OpenAI 兼容 `POST {model,input}`（vLLM/Infinity/TEI） | 本地，已在用 |
+| `gemini` | `POST {base}/models/{model}:batchEmbedContents`，头 `x-goog-api-key` | **云端新增** |
+
+一致性保证：两类 provider 由同一契约实现，索引只消费 `number[][]`；余弦融合、
+BM25、排序代码与 provider 无关——同一语料、同一查询，无论向量来自本地 vLLM 还
+是 Gemini，**检索结果与分数逐项一致**（测试 `tests/rag-gemini.spec.ts` 用同一
+确定性向量分别走两条线路断言结果完全相同）。
+
+### 环境变量设置位置（两处）
+
+- 模板：`ideaget/.env.example`（已更新，含本地与 Gemini 两段，密钥留空）。
+- 实际生效：`ideaget/.env`（launcher 从调用目录读取；`DEEPSEEK_API_KEY` 同在此）。
+  切到云端只需：
+  ```bash
+  IDEAGET_EMBEDDING_PROVIDER=gemini
+  GEMINI_API_KEY=<你的 key>        # 或 GOOGLE_API_KEY
+  # IDEAGET_GEMINI_MODEL=gemini-embedding-001   # 默认即可
+  ```
+- 配置后需重建索引向量：触发一次 `indexCorpus()`（rag-smoke / ingest / 后续
+  corpus 工具），之后 `search()` 自动余弦融合（dense 权重 0.6 / sparse 0.4，
+  可在插件 Config 调）。
