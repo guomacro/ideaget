@@ -161,3 +161,58 @@ host 行被 loader 装入 = client half 自动被发现。这是 out-of-tree 双
    （设计文档 03 的三栏视图）。
 3. Settings → Plugins 出现 ideaget 配置卡片。
 4. 会话内 `/ideaget status`（后端命令）显示 zotero 探测结果（版本/能力分支）。
+
+## 7. 已实测的注册与启动步骤（2026-09，$DSH_HOME=/home/macro/.dsh）
+
+自定义 profile 不会被官方模板预置：`dsh plugin` 首次遇到名字 `ideaget` 时只
+初始化为 `[@deepseek-ai/dsh-base]`，需要再补 web-app 层。注意子命令形态是
+`dsh plugin --profile <name> <pnpm args…>`（`plugin` 在 `--profile` 之前）。
+
+```sh
+# 0) 官方 CLI 用源码模式：在 deepseek-harness 目录执行 pnpm dsh（tsx 经官方
+#    tsconfig paths 解析到 src；直接跑 built lib 会因产物过期缺 FiberState）
+cd <deepseek-harness>
+
+# 1) 首次注册（自动 init：manifest/cordis.patch.yml/pnpm-workspace.yaml + base 层）
+#    显式钉版本：latest dist-tag 是旧的 0.0.1-rc.1，必须装 0.1.2-rc.1
+pnpm dsh plugin --profile ideaget add @deepseek-ai/dsh-web-app@0.1.2-rc.1
+
+# 2) （若 pnpm 报 ERR_PNPM_IGNORED_BUILDS）放行原生依赖构建后重跑上一条
+#    $DSH_HOME/profiles/ideaget/pnpm-workspace.yaml:
+#      allowBuilds:
+#        koffi: false        # true 会触发 koffi 源码构建（可能很慢）；false 即可
+# 3) 加入本项目（link: 指向本目录，reconcile 把 ideaget 写进 bundles）
+pnpm dsh plugin --profile ideaget add /abs/path/to/ideaget
+```
+
+产物（`$DSH_HOME/profiles/ideaget/package.json`）：
+
+```jsonc
+{
+  "name": "dsh-profile-ideaget",
+  "dependencies": {
+    "@deepseek-ai/dsh-web-app": "0.1.2-rc.1",
+    "ideaget": "link:/abs/path/to/ideaget"
+  },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "ideaget"],
+                          "patchReload": "live" } }
+}
+```
+
+### 在 ideaget 目录内启动
+
+`dsh` 不在 PATH，且官方 tsx 需要官方 tsconfig 的 paths 映射。本项目加了本地
+启动脚本（tsx 指向官方 CLI + 官方 tsconfig）：
+
+```sh
+cd <ideaget>
+pnpm dsh --profile ideaget --no-open --port 3399   # 默认 3080 常被占用
+```
+
+等效手写命令：`./node_modules/.bin/tsx --tsconfig=<repo>/tsconfig.json
+<repo>/apps/cli/src/bin.ts --profile ideaget …`。启动成功标志：
+`dsh web: http://127.0.0.1:<port>/?token=…`。Web UI 内 conversation 区应出现
+ideaget 目标（client half 由 `dsh.client` 扫描自动加入，无需官方改动）。
+
+注意：工作区根 = 启动目录（ideaget）；勿在官方仓库目录内启动 agent 任务
+（只读原则）；实测中本机 3080 被另一个 dsh web 实例占用，请换端口。

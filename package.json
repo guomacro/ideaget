@@ -35,7 +35,8 @@
     "test": "vitest run",
     "prepare": "pnpm run build",
     "probe:zotero": "node scripts/probe-zotero.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "dsh": "./node_modules/.bin/tsx --tsconfig=../deepseek-harness/tsconfig.json ../deepseek-harness/apps/cli/src/bin.ts"
   },
   "dsh": {
     "bundle": {
@@ -70,6 +71,7 @@
     "pdf-lib": "^1.17.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "tsx": "^4.23.13",
     "typescript": "~5.9.3",
     "vitest": "^4.1.11"
   }
