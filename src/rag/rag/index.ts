@@ -3,7 +3,9 @@
  *
  * Corpus source: `academic-paper/v1` JSON artifacts (produced by
  * `ideaget_zotero_paper_json`). Indexing scans the corpus directory and
- * persists a JSON index; retrieval is BM25 (sparse) with a pluggable dense
+ * persists a JSON index; artifacts sharing one source PDF (`source.file`)
+ * are indexed once, preferring the canonical Zotero record. Retrieval is
+ * BM25 (sparse) with a pluggable dense
  * leg: when an embedding endpoint is configured (env `IDEAGET_EMBEDDING_*`
  * or plugin Config), queries can be embedded once a dense store lands — until
  * then scores stay BM25-only and the status reports it.
@@ -172,22 +174,42 @@ export class RagIndexService extends Service {
     }
   }
 
-  /** Scan academic artifacts and persist a fresh index. */
+  /** Scan academic artifacts and persist a fresh index.
+   *
+   *  Dedupes corpus files that come from the same source PDF (`source.file`):
+   *  the same paper frequently exists twice — once as a Zotero item artifact
+   *  (`<itemKey>.academic.json`, carries `source.ref`/title/DOI) and once as a
+   *  bare PDF import (`file-*.academic.json`). Canonical records (with a
+   *  `source.ref`) are ranked first and win; duplicates are skipped entirely,
+   *  so papers/chunks/vectors are never double-counted. Files without a
+   *  `source.file` are unaffected. */
   async indexCorpus(): Promise<{ papers: number; chunks: number }> {
     mkdirSync(this.config.corpusDir, { recursive: true })
-    const files = readdirSync(this.config.corpusDir).filter(name => name.endsWith('.academic.json'))
+    const names = readdirSync(this.config.corpusDir).filter(name => name.endsWith('.academic.json'))
+    const entries: { name: string; doc: { source?: { ref?: string; file?: string }; paper?: { title?: string }; body?: { text?: string } } }[] = []
+    for (const name of names) {
+      try {
+        entries.push({ name, doc: JSON.parse(readFileSync(join(this.config.corpusDir, name), 'utf8')) })
+      } catch {
+        // unreadable artifact: skip (kept out of the index, never fatal)
+      }
+    }
+    // Canonical Zotero records (source.ref) first; then lexical name order,
+    // so the richer record wins when a PDF exists under two artifact names.
+    entries.sort((a, b) => {
+      const rank = (doc: { source?: { ref?: string } }): number => (doc.source?.ref ? 0 : 1)
+      return rank(a.doc) - rank(b.doc) || a.name.localeCompare(b.name)
+    })
     const papers: IndexedPaper[] = []
     const chunks: RagChunk[] = []
-    for (const file of files) {
-      let doc: { source?: { ref?: string }; paper?: { title?: string }; body?: { text?: string } }
-      try {
-        doc = JSON.parse(readFileSync(join(this.config.corpusDir, file), 'utf8'))
-      } catch {
-        continue
-      }
+    const seenSourceFile = new Set<string>()
+    for (const { name, doc } of entries) {
+      const sourceFile = (doc.source?.file ?? '').trim()
+      if (sourceFile !== '' && seenSourceFile.has(sourceFile)) continue
       const text = doc.body?.text ?? ''
       if (text.trim() === '') continue
-      const key = file.replace(/\.academic\.json$/, '')
+      if (sourceFile !== '') seenSourceFile.add(sourceFile)
+      const key = name.replace(/\.academic\.json$/, '')
       papers.push({ key, title: doc.paper?.title, ref: doc.source?.ref })
       const paragraphs = text.split(/\n\s*\n/).map(p => p.trim()).filter(p => p !== '')
       let n = 0

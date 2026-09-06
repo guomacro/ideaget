@@ -79,6 +79,55 @@ describe('paper-RAG framework (first version)', () => {
     }
   })
 
+  it('rag: dedupes artifacts sharing one source PDF, keeping the canonical record', async () => {
+    const ctx = new Context()
+    const registered: string[] = []
+    toolStub(ctx, registered)
+    const root = mkdtempSync(join(tmpdir(), 'ideaget-rag-dedupe-'))
+    tempDirs.push(root)
+    const corpusDir = join(root, 'artifacts')
+    const indexDir = join(root, 'index')
+    mkdirSync(corpusDir, { recursive: true })
+    const bodyText = [
+      'Introduction paragraph about lightweight latent reasoning models for robotic manipulation.',
+      'A second paragraph discusses world-action modeling and future-state prediction.',
+    ].join('\n\n')
+    // Canonical Zotero record: carries source.ref + title.
+    writeFileSync(join(corpusDir, 'AAAABBBB.academic.json'), JSON.stringify({
+      schema: 'academic-paper/v1',
+      source: { ref: 'zotero://user/0/item/AAAABBBB', file: 'Yang et al. - 2026 - Paper.pdf' },
+      paper: { title: 'Lightweight Latent Reasoning', abstract: 'abstract', keywords: [] },
+      body: { text: bodyText },
+    }))
+    // Bare PDF-import duplicate of the same PDF: no source.ref/title.
+    writeFileSync(join(corpusDir, 'file-Yang-et-al-2026-Paper.academic.json'), JSON.stringify({
+      schema: 'academic-paper/v1',
+      source: { file: 'Yang et al. - 2026 - Paper.pdf' },
+      paper: { keywords: [] },
+      body: { text: bodyText },
+    }))
+    // Unrelated artifact without source.file must be kept regardless.
+    writeFileSync(join(corpusDir, 'ZZZZ9999.academic.json'), JSON.stringify({
+      schema: 'academic-paper/v1',
+      source: { ref: 'zotero://user/0/item/ZZZZ9999' },
+      paper: { title: 'Unrelated Paper', abstract: 'abstract', keywords: [] },
+      body: { text: 'Completely unrelated content about multisensor data fusion and estimation theory.' },
+    }))
+    await ctx.plugin(RagIndexService, { corpusDir, indexDir, chunkChars: 400, chunkOverlap: 50 })
+    try {
+      const built = await ctx.ragIndex.indexCorpus()
+      expect(built.papers).toBe(2)
+      const hits = await ctx.ragIndex.search('lightweight robotic manipulation', 'concept', 5)
+      expect(hits.length).toBeGreaterThan(0)
+      const keys = new Set(hits.map(h => h.chunk?.paperKey))
+      expect(keys.has('AAAABBBB')).toBe(true)
+      expect(keys.has('file-Yang-et-al-2026-Paper')).toBe(false)
+      expect((hits[0] as { title?: string }).title).toContain('Lightweight')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('router: classifies layers and ask() returns routed evidence', async () => {
     const ctx = new Context()
     const registered: string[] = []
