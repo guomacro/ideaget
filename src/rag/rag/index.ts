@@ -10,6 +10,11 @@
  * or plugin Config), queries can be embedded once a dense store lands — until
  * then scores stay BM25-only and the status reports it.
  *
+ * The sparse leg runs on `EnhancedLexicalStore` (`rag/lexical`), a
+ * synonym-aware Okapi BM25 engine — so without any embedding model the
+ * retrieval engine is the enhanced lexical store (same-score degeneration to
+ * plain BM25 when `lexicalEnhanced` is off).
+ *
  * No model is required for BM25; embeddings default off.
  * @module ideaget/rag/rag
  */
@@ -20,6 +25,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { QueryLayer, RagChunk, RagHit } from '../shared.js'
 import { createEmbeddingProvider, readiness, type EmbeddingProvider } from '../embedding/index.js'
+import { EnhancedLexicalStore, DEFAULT_SYNONYMS } from '../lexical/index.js'
 
 export interface RagIndexConfig {
   /** Embedding provider id: '' | 'url' (endpoint read from env/Config). */
@@ -54,6 +60,9 @@ export interface RagIndexConfig {
   geminiApiKey: string
   /** Gemini API base (env IDEAGET_GEMINI_BASE_URL). */
   geminiBaseUrl: string
+  /** Synonym-aware lexical engine (EnhancedLexicalStore) on the sparse leg;
+   *  off degenerates to plain BM25. No-embedding runs default to enhanced. */
+  lexicalEnhanced: boolean
 }
 
 export const Config: Schema<RagIndexConfig> = Schema.object({
@@ -73,6 +82,7 @@ export const Config: Schema<RagIndexConfig> = Schema.object({
   geminiModel: Schema.string().default('gemini-embedding-001'),
   geminiApiKey: Schema.string().default(''),
   geminiBaseUrl: Schema.string().default('https://generativelanguage.googleapis.com/v1beta'),
+  lexicalEnhanced: Schema.boolean().default(true),
 })
 
 interface IndexedPaper { key: string; title?: string; ref?: string }
@@ -85,19 +95,10 @@ interface CorpusIndex {
   vectors?: number[][]
 }
 
-interface TokenStats { df: Map<string, number>; docLen: number[] }
-
 declare module '@deepseek-ai/cordis' {
   interface Context {
     ragIndex: RagIndexService
   }
-}
-
-const K1 = 1.5
-const B = 0.75
-
-function tokensOf(text: string): string[] {
-  return (text.toLowerCase().match(/[a-z0-9][a-z0-9\-_+]{1,}/g) ?? []).filter(token => token.length > 1)
 }
 
 function pick(env: string | undefined, configured: string | undefined, fallback: string): string {
@@ -113,8 +114,8 @@ export class RagIndexService extends Service {
 
   private readonly config: RagIndexConfig
   private readonly embedder: EmbeddingProvider | null
+  private readonly lexical: EnhancedLexicalStore
   private index: CorpusIndex | null = null
-  private stats: TokenStats | null = null
   private lastDenseError: string | undefined
 
   constructor(ctx: Context, config: Partial<RagIndexConfig> = {}) {
@@ -137,7 +138,13 @@ export class RagIndexService extends Service {
       geminiModel: pick(env.IDEAGET_GEMINI_MODEL, config.geminiModel, 'gemini-embedding-001'),
       geminiApiKey: pick(env.GEMINI_API_KEY, pick(env.GOOGLE_API_KEY, config.geminiApiKey, ''), ''),
       geminiBaseUrl: pick(env.IDEAGET_GEMINI_BASE_URL, config.geminiBaseUrl, 'https://generativelanguage.googleapis.com/v1beta'),
+      lexicalEnhanced: config.lexicalEnhanced ?? true,
     }
+    this.lexical = new EnhancedLexicalStore({
+      // Off == empty synonym table + no plural folding == legacy plain BM25.
+      synonyms: this.config.lexicalEnhanced ? DEFAULT_SYNONYMS : [],
+      pluralFold: this.config.lexicalEnhanced,
+    })
     this.embedder = createEmbeddingProvider({
       provider: this.config.embeddingProvider as '' | 'url' | 'gemini',
       url: this.config.embeddingUrl,
@@ -229,7 +236,7 @@ export class RagIndexService extends Service {
       }
     }
     this.index = index
-    this.stats = computeStats(chunks)
+    this.lexical.build(chunks)
     writeFileSync(join(this.config.indexDir, 'index.json'), JSON.stringify(this.index, null, 2))
     return { papers: papers.length, chunks: chunks.length }
   }
@@ -241,7 +248,7 @@ export class RagIndexService extends Service {
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as CorpusIndex
       if (parsed.version === 1 && Array.isArray(parsed.chunks)) {
         this.index = parsed
-        this.stats = computeStats(parsed.chunks)
+        this.lexical.build(parsed.chunks)
         return
       }
     } catch {
@@ -250,32 +257,15 @@ export class RagIndexService extends Service {
     void this.indexCorpus()
   }
 
-  /** Hybrid search: BM25 always; cosine fusion when dense vectors exist. */
+  /** Hybrid search: enhanced lexical (BM25 + synonym folding) always; cosine
+   *  fusion when dense vectors exist. */
   async search(query: string, layer: QueryLayer, topK: number = this.config.defaultTopK): Promise<RagHit[]> {
     void layer
     this.ensureIndex()
-    if (this.index === null || this.stats === null) return []
-    const terms = tokensOf(query)
-    if (terms.length === 0) return []
+    if (this.index === null) return []
+    if (this.lexical.tokenize(query).length === 0) return []
     const chunks = this.index.chunks
-    const { df, docLen } = this.stats
-    const docCount = Math.max(chunks.length, 1)
-    const avgdl = docLen.reduce((a, b) => a + b, 0) / docCount
-    const idf = (term: string): number => {
-      const n = df.get(term) ?? 0
-      return Math.log(1 + (docCount - n + 0.5) / (n + 0.5))
-    }
-    const sparse: { index: number; score: number }[] = []
-    for (let i = 0; i < chunks.length; i++) {
-      const doc = tokensOf(chunks[i]!.text)
-      let score = 0
-      for (const term of terms) {
-        const tf = doc.filter(t => t === term).length
-        if (tf === 0) continue
-        score += idf(term) * (tf * (K1 + 1)) / (tf + K1 * (1 - B + B * (docLen[i] ?? 1) / avgdl))
-      }
-      if (score > 0) sparse.push({ index: i, score })
-    }
+    const sparse = this.lexical.search(query)
     const paperByKey = new Map(this.index.papers.map(p => [p.key, p]))
 
     const dense = this.index.vectors
@@ -330,6 +320,13 @@ export class RagIndexService extends Service {
     }
   }
 
+  /** Lexical engine state: enhanced == synonym folding + plural folding active
+   *  (default, and the no-embedding path); groups == synonym groups in force
+   *  (0 means plain BM25). */
+  lexicalDiagnosis(): { enhanced: boolean; groups: number } {
+    return { enhanced: this.config.lexicalEnhanced, groups: this.lexical.groupCount() }
+  }
+
   status(): { papers: number; chunks: number; indexed: boolean } {
     this.ensureIndex()
     return {
@@ -371,16 +368,6 @@ function windowed(text: string, size: number, overlap: number): string[] {
     start = end - overlap
   }
   return pieces.filter(p => p.length > 40)
-}
-
-function computeStats(chunks: RagChunk[]): TokenStats {
-  const df = new Map<string, number>()
-  const docLen = chunks.map(chunk => {
-    const terms = tokensOf(chunk.text)
-    for (const seen of new Set(terms)) df.set(seen, (df.get(seen) ?? 0) + 1)
-    return terms.length
-  })
-  return { df, docLen }
 }
 
 function excerpt(text: string, max: number): string {
